@@ -63,6 +63,7 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const cancelledRef = useRef(false);
+  const completedIdsRef = useRef<Set<number>>(new Set());
 
   // ─── Parse JSON ──────────────────────────────────────────────────
   const handleParse = useCallback(() => {
@@ -110,26 +111,17 @@ export default function Home() {
       const segment = segments[i];
 
       // Skip already-completed images (for resume)
-      setImages((prev) => {
-        const existing = prev.find((img) => img.id === segment.id);
-        if (existing?.status === "complete") return prev;
-        return prev.map((img) =>
-          img.id === segment.id ? { ...img, status: "generating" } : img
-        );
-      });
-
-      // Check if already complete (for resume)
-      const alreadyComplete = await new Promise<boolean>((resolve) => {
-        setImages((prev) => {
-          const existing = prev.find((img) => img.id === segment.id);
-          resolve(existing?.status === "complete");
-          return prev;
-        });
-      });
-      if (alreadyComplete) {
-        setProgress((p) => ({ ...p, current: p.current + 1 }));
+      if (completedIdsRef.current.has(segment.id)) {
+        setProgress((p) => ({ ...p, current: i + 1 }));
         continue;
       }
+
+      // Mark as generating
+      setImages((prev) =>
+        prev.map((img) =>
+          img.id === segment.id ? { ...img, status: "generating", error: undefined } : img
+        )
+      );
 
       let attempts = 0;
       const maxAttempts = 3;
@@ -145,7 +137,6 @@ export default function Home() {
           });
 
           if (res.status === 429) {
-            // Rate limited — wait and retry
             const waitTime = attempts * 15000;
             setImages((prev) =>
               prev.map((img) =>
@@ -164,6 +155,7 @@ export default function Home() {
           }
 
           const data = await res.json();
+          completedIdsRef.current.add(segment.id);
           setImages((prev) =>
             prev.map((img) =>
               img.id === segment.id
@@ -235,6 +227,7 @@ export default function Home() {
         }
 
         const data = await res.json();
+        completedIdsRef.current.add(failedImg.id);
         setImages((prev) =>
           prev.map((img) =>
             img.id === failedImg.id
@@ -278,6 +271,7 @@ export default function Home() {
   // ─── Reset ───────────────────────────────────────────────────────
   const handleReset = useCallback(() => {
     cancelledRef.current = true;
+    completedIdsRef.current.clear();
     setJsonInput("");
     setSegments([]);
     setImages([]);
