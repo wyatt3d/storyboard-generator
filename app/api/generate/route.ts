@@ -78,8 +78,8 @@ export async function POST(req: NextRequest) {
                   style: "natural",
                 });
                 result.status = "complete";
-                result.imageUrl = retry.data[0]?.url;
-                result.revisedPrompt = retry.data[0]?.revised_prompt;
+                result.imageUrl = retry.data?.[0]?.url;
+                result.revisedPrompt = retry.data?.[0]?.revised_prompt;
                 delete result.error;
               } catch (retryErr: unknown) {
                 const retryMsg = retryErr instanceof Error ? retryErr.message : "Retry failed";
