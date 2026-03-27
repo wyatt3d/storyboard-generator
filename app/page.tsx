@@ -180,15 +180,22 @@ export default function Home() {
   // ─── Download Single Image ───────────────────────────────────────
   const handleDownload = useCallback(async (url: string, filename: string) => {
     try {
-      const res = await fetch(`/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`);
-      const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      if (url.startsWith("data:")) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+      } else {
+        const res = await fetch(`/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`);
+        const blob = await res.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
     } catch {
-      alert("Download failed — the image URL may have expired. Re-generate to get a fresh link.");
+      alert("Download failed.");
     }
   }, []);
 

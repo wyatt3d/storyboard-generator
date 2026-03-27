@@ -24,12 +24,11 @@ async function generateImage(prompt: string, apiKey: string) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "dall-e-3",
+      model: "gpt-image-1",
       prompt: `${prompt}\n\n${NEGATIVE_PROMPT}`,
       n: 1,
-      size: "1792x1024",
-      quality: "hd",
-      style: "natural",
+      size: "1536x1024",
+      quality: "high",
     }),
   });
 
@@ -39,10 +38,9 @@ async function generateImage(prompt: string, apiKey: string) {
   }
 
   const data = await res.json();
-  return {
-    url: data.data?.[0]?.url,
-    revised_prompt: data.data?.[0]?.revised_prompt,
-  };
+  const b64 = data.data?.[0]?.b64_json;
+  if (!b64) throw new Error("No image data returned");
+  return { dataUrl: `data:image/png;base64,${b64}` };
 }
 
 export async function POST(req: NextRequest) {
@@ -79,8 +77,7 @@ export async function POST(req: NextRequest) {
           try {
             const image = await generateImage(segment.prompt, apiKey);
             result.status = "complete";
-            result.imageUrl = image.url;
-            result.revisedPrompt = image.revised_prompt;
+            result.imageUrl = image.dataUrl;
           } catch (err: unknown) {
             const errorMessage = err instanceof Error ? err.message : "Unknown error";
             result.status = "error";
@@ -92,8 +89,7 @@ export async function POST(req: NextRequest) {
               try {
                 const image = await generateImage(segment.prompt, apiKey);
                 result.status = "complete";
-                result.imageUrl = image.url;
-                result.revisedPrompt = image.revised_prompt;
+                result.imageUrl = image.dataUrl;
                 delete result.error;
               } catch (retryErr: unknown) {
                 const retryMsg = retryErr instanceof Error ? retryErr.message : "Retry failed";
@@ -105,7 +101,7 @@ export async function POST(req: NextRequest) {
 
           controller.enqueue(encoder.encode(JSON.stringify(result) + "\n"));
 
-          // Small delay between requests to avoid rate limits (DALL-E 3: ~7 img/min)
+          // Small delay between requests to avoid rate limits
           if (i < segments.length - 1) {
             await new Promise((r) => setTimeout(r, 9000));
           }
