@@ -1,8 +1,6 @@
 import { NextRequest } from "next/server";
 import OpenAI from "openai";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 // Negative prompt to append as instruction
 const NEGATIVE_PROMPT =
   "Do NOT include: photorealistic, 3D, detailed faces, realistic proportions, cluttered, colorful, gradients, modern digital art, cartoonish, anime, thick outlines, blurry, text, watermarks, extra limbs, dark background, heavy shadows, photographic, overly detailed clothing.";
@@ -28,6 +26,8 @@ export async function POST(req: NextRequest) {
     if (!process.env.OPENAI_API_KEY) {
       return Response.json({ error: "OPENAI_API_KEY not configured" }, { status: 500 });
     }
+
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     // Stream results back as newline-delimited JSON
     const encoder = new TextEncoder();
