@@ -56,6 +56,7 @@ export default function Home() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isParsed, setIsParsed] = useState(false);
   const [parseError, setParseError] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const abortRef = useRef<AbortController | null>(null);
 
@@ -241,13 +242,32 @@ export default function Home() {
             </button>
           </div>
 
-          <textarea
-            value={jsonInput}
-            onChange={(e) => setJsonInput(e.target.value)}
-            placeholder='{\n  "title": "Video Title",\n  "segments": [\n    {\n      "id": 1,\n      "timestamp": "0:00-0:10",\n      "coreIdea": "...",\n      "prompt": "Full DALL-E prompt here..."\n    }\n  ]\n}'
-            className="w-full h-96 bg-[#111] border border-gray-700 rounded-lg p-4 font-mono text-sm text-gray-200 resize-y focus:outline-none focus:border-blue-500 transition"
-            spellCheck={false}
-          />
+          <div
+            className={`relative rounded-lg transition ${isDragging ? "ring-2 ring-blue-500 bg-blue-500/10" : ""}`}
+            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+              const file = e.dataTransfer.files[0];
+              if (file && file.name.endsWith(".json")) {
+                file.text().then((text) => setJsonInput(text));
+              }
+            }}
+          >
+            {isDragging && (
+              <div className="absolute inset-0 flex items-center justify-center bg-blue-500/10 border-2 border-dashed border-blue-500 rounded-lg z-10 pointer-events-none">
+                <span className="text-blue-400 font-medium">Drop JSON file here</span>
+              </div>
+            )}
+            <textarea
+              value={jsonInput}
+              onChange={(e) => setJsonInput(e.target.value)}
+              placeholder='Paste JSON or drag & drop a .json file here\n\n{\n  "title": "Video Title",\n  "segments": [\n    {\n      "id": 1,\n      "timestamp": "0:00-0:10",\n      "coreIdea": "...",\n      "prompt": "Full DALL-E prompt here..."\n    }\n  ]\n}'
+              className="w-full h-96 bg-[#111] border border-gray-700 rounded-lg p-4 font-mono text-sm text-gray-200 resize-y focus:outline-none focus:border-blue-500 transition"
+              spellCheck={false}
+            />
+          </div>
 
           {parseError && (
             <div className="bg-red-900/30 border border-red-700 text-red-300 px-4 py-3 rounded-lg text-sm">
