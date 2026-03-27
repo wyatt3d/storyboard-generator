@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import OpenAI from "openai";
+
+export const runtime = "nodejs";
 
 // Negative prompt to append as instruction
 const NEGATIVE_PROMPT =
@@ -15,6 +16,35 @@ interface Segment {
   animationNote?: string;
 }
 
+async function generateImage(prompt: string, apiKey: string) {
+  const res = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "dall-e-3",
+      prompt: `${prompt}\n\n${NEGATIVE_PROMPT}`,
+      n: 1,
+      size: "1792x1024",
+      quality: "hd",
+      style: "natural",
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `OpenAI API error: ${res.status}`);
+  }
+
+  const data = await res.json();
+  return {
+    url: data.data?.[0]?.url,
+    revised_prompt: data.data?.[0]?.revised_prompt,
+  };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { segments } = (await req.json()) as { segments: Segment[] };
@@ -23,11 +53,10 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: "No segments provided" }, { status: 400 });
     }
 
-    if (!process.env.OPENAI_API_KEY) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
       return Response.json({ error: "OPENAI_API_KEY not configured" }, { status: 500 });
     }
-
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     // Stream results back as newline-delimited JSON
     const encoder = new TextEncoder();
@@ -48,18 +77,10 @@ export async function POST(req: NextRequest) {
           controller.enqueue(encoder.encode(JSON.stringify(result) + "\n"));
 
           try {
-            const response = await openai.images.generate({
-              model: "dall-e-3",
-              prompt: `${segment.prompt}\n\n${NEGATIVE_PROMPT}`,
-              n: 1,
-              size: "1792x1024",
-              quality: "hd",
-              style: "natural",
-            });
-
+            const image = await generateImage(segment.prompt, apiKey);
             result.status = "complete";
-            result.imageUrl = response.data?.[0]?.url;
-            result.revisedPrompt = response.data?.[0]?.revised_prompt;
+            result.imageUrl = image.url;
+            result.revisedPrompt = image.revised_prompt;
           } catch (err: unknown) {
             const errorMessage = err instanceof Error ? err.message : "Unknown error";
             result.status = "error";
@@ -69,17 +90,10 @@ export async function POST(req: NextRequest) {
             if (errorMessage.includes("Rate limit") || errorMessage.includes("429")) {
               await new Promise((r) => setTimeout(r, 15000));
               try {
-                const retry = await openai.images.generate({
-                  model: "dall-e-3",
-                  prompt: `${segment.prompt}\n\n${NEGATIVE_PROMPT}`,
-                  n: 1,
-                  size: "1792x1024",
-                  quality: "hd",
-                  style: "natural",
-                });
+                const image = await generateImage(segment.prompt, apiKey);
                 result.status = "complete";
-                result.imageUrl = retry.data?.[0]?.url;
-                result.revisedPrompt = retry.data?.[0]?.revised_prompt;
+                result.imageUrl = image.url;
+                result.revisedPrompt = image.revised_prompt;
                 delete result.error;
               } catch (retryErr: unknown) {
                 const retryMsg = retryErr instanceof Error ? retryErr.message : "Retry failed";
@@ -107,7 +121,7 @@ export async function POST(req: NextRequest) {
       headers: {
         "Content-Type": "application/x-ndjson",
         "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
+        Connection: "keep-alive",
       },
     });
   } catch {
