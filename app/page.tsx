@@ -17,7 +17,6 @@ interface GeneratedImage {
   coreIdea: string;
   status: "pending" | "generating" | "complete" | "error";
   imageUrl?: string;
-  revisedPrompt?: string;
   error?: string;
 }
 
@@ -48,6 +47,11 @@ const SAMPLE_JSON = JSON.stringify(
   2
 );
 
+// ─── Helpers ─────────────────────────────────────────────────────────
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 // ─── Main Component ──────────────────────────────────────────────────
 export default function Home() {
   const [jsonInput, setJsonInput] = useState("");
@@ -58,7 +62,7 @@ export default function Home() {
   const [parseError, setParseError] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
-  const abortRef = useRef<AbortController | null>(null);
+  const cancelledRef = useRef(false);
 
   // ─── Parse JSON ──────────────────────────────────────────────────
   const handleParse = useCallback(() => {
@@ -69,7 +73,6 @@ export default function Home() {
       if (!Array.isArray(segs) || segs.length === 0) {
         throw new Error("JSON must contain a 'segments' array with at least one segment.");
       }
-      // Validate each segment
       for (let i = 0; i < segs.length; i++) {
         if (!segs[i].prompt) {
           throw new Error(`Segment ${i + 1} is missing a 'prompt' field.`);
@@ -94,109 +97,172 @@ export default function Home() {
     }
   }, [jsonInput]);
 
-  // ─── Generate Images ─────────────────────────────────────────────
+  // ─── Generate Images (one per request) ─────────────────────────
   const handleGenerate = useCallback(async () => {
     if (segments.length === 0) return;
     setIsGenerating(true);
+    cancelledRef.current = false;
     setProgress({ current: 0, total: segments.length });
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    for (let i = 0; i < segments.length; i++) {
+      if (cancelledRef.current) break;
 
-    try {
-      const response = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ segments }),
-        signal: controller.signal,
+      const segment = segments[i];
+
+      // Skip already-completed images (for resume)
+      setImages((prev) => {
+        const existing = prev.find((img) => img.id === segment.id);
+        if (existing?.status === "complete") return prev;
+        return prev.map((img) =>
+          img.id === segment.id ? { ...img, status: "generating" } : img
+        );
       });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || "Generation failed");
+      // Check if already complete (for resume)
+      const alreadyComplete = await new Promise<boolean>((resolve) => {
+        setImages((prev) => {
+          const existing = prev.find((img) => img.id === segment.id);
+          resolve(existing?.status === "complete");
+          return prev;
+        });
+      });
+      if (alreadyComplete) {
+        setProgress((p) => ({ ...p, current: p.current + 1 }));
+        continue;
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No response stream");
+      let attempts = 0;
+      const maxAttempts = 3;
+      let success = false;
 
-      const decoder = new TextDecoder();
-      let buffer = "";
+      while (attempts < maxAttempts && !success && !cancelledRef.current) {
+        attempts++;
+        try {
+          const res = await fetch("/api/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: segment.prompt, id: segment.id }),
+          });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const data = JSON.parse(line);
-            if (data.done) break;
-
-            if (data.status === "complete" || data.status === "error") {
-              setProgress((p) => ({ ...p, current: (data.index ?? p.current) + 1 }));
-            }
-
+          if (res.status === 429) {
+            // Rate limited — wait and retry
+            const waitTime = attempts * 15000;
             setImages((prev) =>
               prev.map((img) =>
-                img.id === data.id
-                  ? {
-                      ...img,
-                      status: data.status,
-                      imageUrl: data.imageUrl || img.imageUrl,
-                      revisedPrompt: data.revisedPrompt || img.revisedPrompt,
-                      error: data.error || img.error,
-                    }
+                img.id === segment.id
+                  ? { ...img, error: `Rate limited, retrying in ${waitTime / 1000}s...` }
                   : img
               )
             );
-          } catch {
-            // skip malformed lines
+            await sleep(waitTime);
+            continue;
+          }
+
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "Unknown error" }));
+            throw new Error(err.error || `HTTP ${res.status}`);
+          }
+
+          const data = await res.json();
+          setImages((prev) =>
+            prev.map((img) =>
+              img.id === segment.id
+                ? { ...img, status: "complete", imageUrl: data.imageUrl, error: undefined }
+                : img
+            )
+          );
+          success = true;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : "Unknown error";
+          if (attempts >= maxAttempts) {
+            setImages((prev) =>
+              prev.map((img) =>
+                img.id === segment.id ? { ...img, status: "error", error: msg } : img
+              )
+            );
+          } else {
+            await sleep(5000);
           }
         }
       }
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === "AbortError") {
-        // User cancelled
-      } else {
-        const msg = err instanceof Error ? err.message : "Unknown error";
-        setParseError(msg);
+
+      setProgress((p) => ({ ...p, current: i + 1 }));
+
+      // Brief delay between requests to avoid rate limits
+      if (i < segments.length - 1 && !cancelledRef.current) {
+        await sleep(2000);
       }
-    } finally {
-      setIsGenerating(false);
-      abortRef.current = null;
     }
+
+    setIsGenerating(false);
   }, [segments]);
 
   // ─── Stop Generation ─────────────────────────────────────────────
   const handleStop = useCallback(() => {
-    abortRef.current?.abort();
+    cancelledRef.current = true;
     setIsGenerating(false);
   }, []);
 
-  // ─── Download Single Image ───────────────────────────────────────
-  const handleDownload = useCallback(async (url: string, filename: string) => {
-    try {
-      if (url.startsWith("data:")) {
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        a.click();
-      } else {
-        const res = await fetch(`/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`);
-        const blob = await res.blob();
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(a.href);
+  // ─── Retry Failed ────────────────────────────────────────────────
+  const handleRetryFailed = useCallback(async () => {
+    const failedImages = images.filter((img) => img.status === "error");
+    if (failedImages.length === 0) return;
+    setIsGenerating(true);
+    cancelledRef.current = false;
+
+    for (const failedImg of failedImages) {
+      if (cancelledRef.current) break;
+
+      const segment = segments.find((s) => s.id === failedImg.id);
+      if (!segment) continue;
+
+      setImages((prev) =>
+        prev.map((img) =>
+          img.id === failedImg.id ? { ...img, status: "generating", error: undefined } : img
+        )
+      );
+
+      try {
+        const res = await fetch("/api/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt: segment.prompt, id: segment.id }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: "Unknown error" }));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        setImages((prev) =>
+          prev.map((img) =>
+            img.id === failedImg.id
+              ? { ...img, status: "complete", imageUrl: data.imageUrl, error: undefined }
+              : img
+          )
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        setImages((prev) =>
+          prev.map((img) =>
+            img.id === failedImg.id ? { ...img, status: "error", error: msg } : img
+          )
+        );
       }
-    } catch {
-      alert("Download failed.");
+
+      await sleep(2000);
     }
+
+    setIsGenerating(false);
+  }, [images, segments]);
+
+  // ─── Download Single Image ───────────────────────────────────────
+  const handleDownload = useCallback((url: string, filename: string) => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
   }, []);
 
   // ─── Download All Images ─────────────────────────────────────────
@@ -204,14 +270,14 @@ export default function Home() {
     const completed = images.filter((img) => img.status === "complete" && img.imageUrl);
     for (const img of completed) {
       const filename = `segment_${String(img.id).padStart(3, "0")}_${img.timestamp.replace(/[:/]/g, "-")}.png`;
-      await handleDownload(img.imageUrl!, filename);
-      // Small delay so browser doesn't block multiple downloads
-      await new Promise((r) => setTimeout(r, 500));
+      handleDownload(img.imageUrl!, filename);
+      await sleep(500);
     }
   }, [images, handleDownload]);
 
   // ─── Reset ───────────────────────────────────────────────────────
   const handleReset = useCallback(() => {
+    cancelledRef.current = true;
     setJsonInput("");
     setSegments([]);
     setImages([]);
@@ -232,7 +298,7 @@ export default function Home() {
       <div className="mb-8">
         <h1 className="text-3xl font-bold mb-1">Storyboard Image Generator</h1>
         <p className="text-gray-400 text-sm">
-          Paste your storyboard JSON schema → generate DALL-E 3 images for every segment
+          Paste your storyboard JSON schema &rarr; generate images for every segment
         </p>
       </div>
 
@@ -270,7 +336,7 @@ export default function Home() {
             <textarea
               value={jsonInput}
               onChange={(e) => setJsonInput(e.target.value)}
-              placeholder='Paste JSON or drag & drop a .json file here\n\n{\n  "title": "Video Title",\n  "segments": [\n    {\n      "id": 1,\n      "timestamp": "0:00-0:10",\n      "coreIdea": "...",\n      "prompt": "Full DALL-E prompt here..."\n    }\n  ]\n}'
+              placeholder='Paste JSON or drag & drop a .json file here&#10;&#10;{&#10;  "title": "Video Title",&#10;  "segments": [&#10;    {&#10;      "id": 1,&#10;      "timestamp": "0:00-0:10",&#10;      "coreIdea": "...",&#10;      "prompt": "Full image prompt here..."&#10;    }&#10;  ]&#10;}'
               className="w-full h-96 bg-[#111] border border-gray-700 rounded-lg p-4 font-mono text-sm text-gray-200 resize-y focus:outline-none focus:border-blue-500 transition"
               spellCheck={false}
             />
@@ -288,7 +354,7 @@ export default function Home() {
               disabled={!jsonInput.trim()}
               className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 rounded-lg font-medium transition"
             >
-              Parse & Preview ({jsonInput ? "..." : "0"} segments)
+              Parse & Preview
             </button>
           </div>
 
@@ -305,7 +371,7 @@ export default function Home() {
       "id": number,           // Segment number (auto-assigned if missing)
       "timestamp": "string",  // e.g. "0:00-0:10"
       "coreIdea": "string",   // One-sentence description
-      "prompt": "string",     // Full DALL-E prompt (REQUIRED)
+      "prompt": "string",     // Full image prompt (REQUIRED)
       "animationNote": "string" // Ken Burns note (optional)
     }
   ]
@@ -332,7 +398,7 @@ export default function Home() {
               {!isGenerating && completedCount > 0 && (
                 <span className="text-sm text-green-400">
                   {completedCount} complete
-                  {errorCount > 0 && <span className="text-red-400 ml-2">· {errorCount} failed</span>}
+                  {errorCount > 0 && <span className="text-red-400 ml-2">&middot; {errorCount} failed</span>}
                 </span>
               )}
             </div>
@@ -352,6 +418,14 @@ export default function Home() {
                   className="px-5 py-2 bg-red-600 hover:bg-red-500 rounded-lg text-sm font-medium transition"
                 >
                   Stop
+                </button>
+              )}
+              {errorCount > 0 && !isGenerating && (
+                <button
+                  onClick={handleRetryFailed}
+                  className="px-5 py-2 bg-yellow-600 hover:bg-yellow-500 rounded-lg text-sm font-medium transition"
+                >
+                  Retry Failed ({errorCount})
                 </button>
               )}
               {completedCount > 0 && !isGenerating && (
@@ -405,7 +479,9 @@ export default function Home() {
                   {img.status === "generating" && (
                     <div className="flex flex-col items-center gap-2">
                       <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                      <span className="text-blue-400 text-xs">Generating...</span>
+                      <span className="text-blue-400 text-xs">
+                        {img.error || "Generating..."}
+                      </span>
                     </div>
                   )}
                   {img.status === "complete" && img.imageUrl && (
@@ -428,7 +504,7 @@ export default function Home() {
                 <div className="p-3 space-y-1">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-mono text-gray-500">
-                      #{img.id} · {img.timestamp}
+                      #{img.id} &middot; {img.timestamp}
                     </span>
                     {img.status === "complete" && img.imageUrl && (
                       <button
@@ -453,8 +529,7 @@ export default function Home() {
           {/* Estimated Time */}
           {!isGenerating && pendingCount > 0 && completedCount === 0 && (
             <p className="text-center text-sm text-gray-500">
-              Estimated time: ~{Math.ceil((segments.length * 12) / 60)} minutes for {segments.length} images
-              (DALL-E 3 rate limit: ~5-7 images/min)
+              Estimated time: ~{Math.ceil((segments.length * 15) / 60)} minutes for {segments.length} images
             </p>
           )}
         </div>
