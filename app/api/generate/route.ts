@@ -58,8 +58,8 @@ export async function POST(req: NextRequest) {
             });
 
             result.status = "complete";
-            result.imageUrl = response.data[0]?.url;
-            result.revisedPrompt = response.data[0]?.revised_prompt;
+            result.imageUrl = response.data?.[0]?.url;
+            result.revisedPrompt = response.data?.[0]?.revised_prompt;
           } catch (err: unknown) {
             const errorMessage = err instanceof Error ? err.message : "Unknown error";
             result.status = "error";
